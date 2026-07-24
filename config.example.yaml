@@ -125,6 +125,14 @@ error-logs-max-files: 10
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
+# Fake prompt-cache fields on OpenAI chat.completion usage (stream + non-stream).
+# Adds usage.cache_read_input_tokens = prompt_tokens * percent / 100.
+# percent 0 → field present with 0; percent 50 → half of prompt_tokens.
+# fake-cache:
+#   enabled: false
+#   percent: 0
+#   sync-cached-tokens: false
+
 # How long (in seconds) usage queue items are retained in memory for the Management API.
 # The local Redis RESP usage output is disabled.
 # Default: 60. Max: 3600.

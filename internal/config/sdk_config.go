@@ -55,6 +55,60 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+
+	// FakeCache is a legacy simple percent injector. Prefer CacheCompensation.
+	// Kept for backward compatibility; when CacheCompensation.Enabled is true it wins.
+	FakeCache FakeCacheConfig `yaml:"fake-cache" json:"fake-cache"`
+
+	// CacheCompensation is the Anthropic-compatible prompt-cache usage strategy for
+	// Grok/OpenAI-style upstreams (normalize + structure analysis + packaging
+	// overhead + hit-rate compensation). Applies to OpenAI chat.completion and
+	// Claude /v1/messages responses (stream + non-stream).
+	CacheCompensation CacheCompensationConfig `yaml:"cache-compensation" json:"cache-compensation"`
+}
+
+// FakeCacheConfig controls synthetic prompt-cache token reporting on outbound usage.
+type FakeCacheConfig struct {
+	// Enabled toggles fake cache injection. Default false.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Percent is the share of prompt/input tokens reported as cache hits (0-100).
+	// cache_read_input_tokens = prompt_tokens * Percent / 100.
+	Percent int `yaml:"percent" json:"percent"`
+	// SyncCachedTokens also overwrites usage.prompt_tokens_details.cached_tokens
+	// (and input_tokens_details.cached_tokens when present) with the same value.
+	// Default false: only cache_read_input_tokens is added/updated.
+	SyncCachedTokens bool `yaml:"sync-cached-tokens" json:"sync-cached-tokens"`
+}
+
+// CacheCompensationConfig is the full Grok→Anthropic cache usage strategy.
+type CacheCompensationConfig struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// HitRateTarget is desired cache_read / (input+creation+read), 0..1. Default 0.80.
+	HitRateTarget float64 `yaml:"hit-rate-target" json:"hit-rate-target"`
+	// MinCacheableTokens minimum estimated cacheable prefix. Default 100.
+	MinCacheableTokens int `yaml:"min-cacheable-tokens" json:"min-cacheable-tokens"`
+	// EphemeralTTLSeconds local LRU TTL for ephemeral prefixes. Default 300.
+	EphemeralTTLSeconds int `yaml:"ephemeral-ttl-seconds" json:"ephemeral-ttl-seconds"`
+	// StaticTTLSeconds local LRU TTL for static prefixes. Default 3600.
+	StaticTTLSeconds int `yaml:"static-ttl-seconds" json:"static-ttl-seconds"`
+	// MaxEntries local LRU capacity. Default 10000.
+	MaxEntries int `yaml:"max-entries" json:"max-entries"`
+	// TokenMultiplier scales compensated input/output. Default 1.0.
+	TokenMultiplier float64 `yaml:"token-multiplier" json:"token-multiplier"`
+	// MetadataEnabled toggles packaging overhead subtraction. Default true when enabled.
+	MetadataEnabled *bool `yaml:"metadata-enabled,omitempty" json:"metadata-enabled,omitempty"`
+	// MinInputTokens floor after packaging compensation. Default 10.
+	MinInputTokens int64 `yaml:"min-input-tokens" json:"min-input-tokens"`
+	// BaseOverhead / per-* overheads for Grok packaging compensation.
+	BaseOverhead          int64 `yaml:"base-overhead" json:"base-overhead"`
+	PerMessageOverhead    int64 `yaml:"per-message-overhead" json:"per-message-overhead"`
+	PerToolOverhead       int64 `yaml:"per-tool-overhead" json:"per-tool-overhead"`
+	PerSystemOverhead     int64 `yaml:"per-system-overhead" json:"per-system-overhead"`
+	ThinkingOverhead      int64 `yaml:"thinking-overhead" json:"thinking-overhead"`
+	ToolResultOverhead    int64 `yaml:"tool-result-overhead" json:"tool-result-overhead"`
+	InjectedSystemTokens  int64 `yaml:"injected-system-tokens" json:"injected-system-tokens"`
+	// SyncOpenAICachedTokens also writes prompt_tokens_details.cached_tokens.
+	SyncOpenAICachedTokens bool `yaml:"sync-openai-cached-tokens" json:"sync-openai-cached-tokens"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.

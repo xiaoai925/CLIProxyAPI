@@ -193,6 +193,108 @@ func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.UsageStatisticsEnabled = v })
 }
 
+
+// CacheCompensation full Anthropic-compatible Grok cache usage strategy.
+func (h *Handler) GetCacheCompensation(c *gin.Context) {
+	if h == nil || h.cfg == nil {
+		c.JSON(200, gin.H{"cache-compensation": config.CacheCompensationConfig{}})
+		return
+	}
+	c.JSON(200, gin.H{"cache-compensation": h.cfg.CacheCompensation})
+}
+
+func (h *Handler) PutCacheCompensation(c *gin.Context) {
+	var body struct {
+		CacheCompensation *config.CacheCompensationConfig `json:"cache-compensation"`
+		Value             *config.CacheCompensationConfig `json:"value"`
+		Enabled           *bool                           `json:"enabled"`
+		HitRateTarget     *float64                        `json:"hit-rate-target"`
+		MinCacheable      *int                            `json:"min-cacheable-tokens"`
+		SyncOpenAI        *bool                           `json:"sync-openai-cached-tokens"`
+		MetadataEnabled   *bool                           `json:"metadata-enabled"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	next := h.cfg.CacheCompensation
+	if body.CacheCompensation != nil {
+		next = *body.CacheCompensation
+	} else if body.Value != nil {
+		next = *body.Value
+	}
+	if body.Enabled != nil {
+		next.Enabled = *body.Enabled
+	}
+	if body.HitRateTarget != nil {
+		next.HitRateTarget = *body.HitRateTarget
+	}
+	if body.MinCacheable != nil {
+		next.MinCacheableTokens = *body.MinCacheable
+	}
+	if body.SyncOpenAI != nil {
+		next.SyncOpenAICachedTokens = *body.SyncOpenAI
+	}
+	if body.MetadataEnabled != nil {
+		next.MetadataEnabled = body.MetadataEnabled
+	}
+	if next.HitRateTarget < 0 {
+		next.HitRateTarget = 0
+	}
+	if next.HitRateTarget > 1 {
+		next.HitRateTarget = 1
+	}
+	h.cfg.CacheCompensation = next
+	h.persist(c)
+}
+
+// FakeCache controls synthetic cache_read_input_tokens injection on chat.completion usage.
+func (h *Handler) GetFakeCache(c *gin.Context) {
+	if h == nil || h.cfg == nil {
+		c.JSON(200, gin.H{"fake-cache": config.FakeCacheConfig{}})
+		return
+	}
+	c.JSON(200, gin.H{"fake-cache": h.cfg.FakeCache})
+}
+
+func (h *Handler) PutFakeCache(c *gin.Context) {
+	var body struct {
+		// Accept either a nested object or flat fields for convenience.
+		FakeCache *config.FakeCacheConfig `json:"fake-cache"`
+		Value     *config.FakeCacheConfig `json:"value"`
+		Enabled   *bool                   `json:"enabled"`
+		Percent   *int                    `json:"percent"`
+		Sync      *bool                   `json:"sync-cached-tokens"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	next := h.cfg.FakeCache
+	if body.FakeCache != nil {
+		next = *body.FakeCache
+	} else if body.Value != nil {
+		next = *body.Value
+	}
+	if body.Enabled != nil {
+		next.Enabled = *body.Enabled
+	}
+	if body.Percent != nil {
+		next.Percent = *body.Percent
+	}
+	if body.Sync != nil {
+		next.SyncCachedTokens = *body.Sync
+	}
+	if next.Percent < 0 {
+		next.Percent = 0
+	}
+	if next.Percent > 100 {
+		next.Percent = 100
+	}
+	h.cfg.FakeCache = next
+	h.persist(c)
+}
+
 // UsageStatisticsEnabled
 func (h *Handler) GetLoggingToFile(c *gin.Context) {
 	c.JSON(200, gin.H{"logging-to-file": h.cfg.LoggingToFile})

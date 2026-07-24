@@ -443,13 +443,17 @@ func (h *OpenAIAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []
 		return
 	}
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-	_, _ = c.Writer.Write(resp)
+	_, _ = c.Writer.Write(handlers.ApplyOpenAIUsageCompensation(h.Cfg, rawJSON, resp))
 	cliCancel()
 }
 
 // handleStreamingResponse handles streaming responses for Gemini models.
 // It establishes a streaming connection with the backend service and forwards
 // the response chunks to the client in real-time using Server-Sent Events.
+//
+// When fake-cache is enabled, the full stream is buffered first so the final
+// usage object (including cache_read_input_tokens) can be copied onto the first
+// chunk before any SSE data is written.
 //
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
@@ -470,6 +474,12 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, h.GetAlt(c))
+
+	// fake-cache needs final usage on the first chunk → buffer whole stream.
+	if handlers.CacheCompEnabled(h.Cfg) {
+		h.streamBufferedChatCompletions(c, flusher, cliCancel, dataChan, errChan, upstreamHeaders, rawJSON, nil)
+		return
+	}
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -513,7 +523,7 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 			setSSEHeaders()
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
-			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
+			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(handlers.ApplyOpenAIUsageCompensation(h.Cfg, rawJSON, chunk)))
 			flusher.Flush()
 
 			// Continue streaming the rest
@@ -547,7 +557,7 @@ func (h *OpenAIAPIHandler) handleCompletionsNonStreamingResponse(c *gin.Context,
 		return
 	}
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-	completionsResp := convertChatCompletionsResponseToCompletions(resp)
+	completionsResp := convertChatCompletionsResponseToCompletions(handlers.ApplyOpenAIUsageCompensation(h.Cfg, chatCompletionsJSON, resp))
 	_, _ = c.Writer.Write(completionsResp)
 	cliCancel()
 }
@@ -578,6 +588,12 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 	modelName := gjson.GetBytes(chatCompletionsJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, chatCompletionsJSON, "")
+
+	// fake-cache: buffer + put final usage on first chunk (after chat→completions convert).
+	if handlers.CacheCompEnabled(h.Cfg) {
+		h.streamBufferedChatCompletions(c, flusher, cliCancel, dataChan, errChan, upstreamHeaders, chatCompletionsJSON, convertChatCompletionsStreamChunkToCompletions)
+		return
+	}
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -620,7 +636,7 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
 			// Write the first chunk
-			converted := convertChatCompletionsStreamChunkToCompletions(chunk)
+			converted := convertChatCompletionsStreamChunkToCompletions(handlers.ApplyOpenAIUsageCompensation(h.Cfg, chatCompletionsJSON, chunk))
 			if converted != nil {
 				_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(converted))
 				flusher.Flush()
@@ -641,7 +657,7 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 						if !ok {
 							return
 						}
-						converted := convertChatCompletionsStreamChunkToCompletions(chunk)
+						converted := convertChatCompletionsStreamChunkToCompletions(handlers.ApplyOpenAIUsageCompensation(h.Cfg, chatCompletionsJSON, chunk))
 						if converted == nil {
 							continue
 						}
@@ -662,10 +678,81 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 		}
 	}
 }
+
+// streamBufferedChatCompletions collects the full SSE stream, injects fake-cache,
+// copies final usage onto the first chunk, then writes all frames at once.
+// convert may be nil (chat completions) or a mapper to /v1/completions chunks.
+func (h *OpenAIAPIHandler) streamBufferedChatCompletions(
+	c *gin.Context,
+	flusher http.Flusher,
+	cliCancel handlers.APIHandlerCancelFunc,
+	dataChan <-chan []byte,
+	errChan <-chan *interfaces.ErrorMessage,
+	upstreamHeaders http.Header,
+	originalRequest []byte,
+	convert func([]byte) []byte,
+) {
+	var chunks [][]byte
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			cliCancel(c.Request.Context().Err())
+			return
+		case errMsg, ok := <-errChan:
+			if !ok {
+				errChan = nil
+				continue
+			}
+			// Fail before any SSE body was committed.
+			if len(chunks) == 0 {
+				h.WriteErrorResponse(c, errMsg)
+			} else {
+				// Headers/body not yet written either (we buffer fully).
+				h.WriteErrorResponse(c, errMsg)
+			}
+			if errMsg != nil {
+				cliCancel(errMsg.Error)
+			} else {
+				cliCancel(nil)
+			}
+			return
+		case chunk, ok := <-dataChan:
+			if !ok {
+				// Stream complete — apply usage-to-first and flush as SSE.
+				c.Header("Content-Type", "text/event-stream")
+				c.Header("Cache-Control", "no-cache")
+				c.Header("Connection", "keep-alive")
+				c.Header("Access-Control-Allow-Origin", "*")
+				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+
+				out := handlers.ApplyOpenAIStreamUsageCompensation(h.Cfg, originalRequest, chunks)
+				for _, item := range out {
+					payload := item
+					if convert != nil {
+						payload = convert(item)
+						if payload == nil {
+							continue
+						}
+					}
+					_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(payload))
+				}
+				_, _ = fmt.Fprint(c.Writer, "data: [DONE]\n\n")
+				flusher.Flush()
+				cliCancel(nil)
+				return
+			}
+			if len(chunk) > 0 {
+				chunks = append(chunks, chunk)
+			}
+		}
+	}
+}
+
 func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
-			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
+			// Live path without buffering: still inject cache fields when possible.
+			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(handlers.ApplyOpenAIUsageCompensation(h.Cfg, nil, chunk)))
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			if errMsg == nil {

@@ -971,6 +971,14 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 		mgmt.PATCH("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 
+		mgmt.GET("/fake-cache", s.mgmt.GetFakeCache)
+		mgmt.PUT("/fake-cache", s.mgmt.PutFakeCache)
+		mgmt.PATCH("/fake-cache", s.mgmt.PutFakeCache)
+
+		mgmt.GET("/cache-compensation", s.mgmt.GetCacheCompensation)
+		mgmt.PUT("/cache-compensation", s.mgmt.PutCacheCompensation)
+		mgmt.PATCH("/cache-compensation", s.mgmt.PutCacheCompensation)
+
 		mgmt.GET("/proxy-url", s.mgmt.GetProxyURL)
 		mgmt.PUT("/proxy-url", s.mgmt.PutProxyURL)
 		mgmt.PATCH("/proxy-url", s.mgmt.PutProxyURL)

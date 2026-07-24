@@ -26,4 +26,7 @@ services:
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
       - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
       - ${CLI_PROXY_PLUGIN_PATH:-./plugins}:/CLIProxyAPI/plugins
+      # Optional custom management panel (e.g. cache-compensation UI).
+      # Pair with remote-management.disable-auto-update-panel: true if used.
+      - ${CLI_PROXY_STATIC_PATH:-./static}:/CLIProxyAPI/static
     restart: unless-stopped

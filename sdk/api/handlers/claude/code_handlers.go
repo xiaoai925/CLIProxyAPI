@@ -243,7 +243,7 @@ func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSO
 	}
 
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-	_, _ = c.Writer.Write(resp)
+	_, _ = c.Writer.Write(handlers.ApplyClaudeUsageCompensation(h.Cfg, rawJSON, resp))
 	cliCancel()
 }
 
@@ -275,6 +275,10 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	if handlers.CacheCompEnabled(h.Cfg) && h.Cfg != nil && h.Cfg.CacheCompensation.Enabled {
+		h.streamBufferedClaude(c, flusher, cliCancel, dataChan, errChan, upstreamHeaders, rawJSON)
+		return
+	}
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
@@ -350,6 +354,60 @@ func pendingClaudeStreamError(errs <-chan *interfaces.ErrorMessage) (*interfaces
 		return errMsg, true
 	default:
 		return nil, false
+	}
+}
+
+// streamBufferedClaude collects the full Anthropic SSE stream, applies cache
+// compensation, aligns usage on message_start/message_delta, then writes once.
+func (h *ClaudeCodeAPIHandler) streamBufferedClaude(
+	c *gin.Context,
+	flusher http.Flusher,
+	cliCancel handlers.APIHandlerCancelFunc,
+	dataChan <-chan []byte,
+	errChan <-chan *interfaces.ErrorMessage,
+	upstreamHeaders http.Header,
+	originalRequest []byte,
+) {
+	var chunks [][]byte
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			cliCancel(c.Request.Context().Err())
+			return
+		case errMsg, ok := <-errChan:
+			if !ok {
+				errChan = nil
+				continue
+			}
+			h.WriteErrorResponse(c, errMsg)
+			if errMsg != nil {
+				cliCancel(errMsg.Error)
+			} else {
+				cliCancel(nil)
+			}
+			return
+		case chunk, ok := <-dataChan:
+			if !ok {
+				c.Header("Content-Type", "text/event-stream")
+				c.Header("Cache-Control", "no-cache")
+				c.Header("Connection", "keep-alive")
+				c.Header("Access-Control-Allow-Origin", "*")
+				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+				out := handlers.ApplyClaudeStreamUsageCompensation(h.Cfg, originalRequest, chunks)
+				for _, item := range out {
+					if len(item) == 0 {
+						continue
+					}
+					_, _ = c.Writer.Write(item)
+				}
+				flusher.Flush()
+				cliCancel(nil)
+				return
+			}
+			if len(chunk) > 0 {
+				chunks = append(chunks, chunk)
+			}
+		}
 	}
 }
 
