@@ -205,13 +205,14 @@ func (h *Handler) GetCacheCompensation(c *gin.Context) {
 
 func (h *Handler) PutCacheCompensation(c *gin.Context) {
 	var body struct {
-		CacheCompensation *config.CacheCompensationConfig `json:"cache-compensation"`
-		Value             *config.CacheCompensationConfig `json:"value"`
-		Enabled           *bool                           `json:"enabled"`
-		HitRateTarget     *float64                        `json:"hit-rate-target"`
-		MinCacheable      *int                            `json:"min-cacheable-tokens"`
-		SyncOpenAI        *bool                           `json:"sync-openai-cached-tokens"`
-		MetadataEnabled   *bool                           `json:"metadata-enabled"`
+		CacheCompensation  *config.CacheCompensationConfig `json:"cache-compensation"`
+		Value              *config.CacheCompensationConfig `json:"value"`
+		Enabled            *bool                           `json:"enabled"`
+		HitRateTarget      *float64                        `json:"hit-rate-target"`
+		CreationRateTarget *float64                        `json:"creation-rate-target"`
+		MinCacheable       *int                            `json:"min-cacheable-tokens"`
+		SyncOpenAI         *bool                           `json:"sync-openai-cached-tokens"`
+		MetadataEnabled    *bool                           `json:"metadata-enabled"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
@@ -228,6 +229,16 @@ func (h *Handler) PutCacheCompensation(c *gin.Context) {
 	}
 	if body.HitRateTarget != nil {
 		next.HitRateTarget = *body.HitRateTarget
+	}
+	if body.CreationRateTarget != nil {
+		v := *body.CreationRateTarget
+		if v < 0 {
+			v = 0
+		}
+		if v > 1 {
+			v = 1
+		}
+		next.CreationRateTarget = &v
 	}
 	if body.MinCacheable != nil {
 		next.MinCacheableTokens = *body.MinCacheable

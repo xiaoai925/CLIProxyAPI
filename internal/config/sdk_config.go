@@ -85,6 +85,10 @@ type CacheCompensationConfig struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
 	// HitRateTarget is desired cache_read / (input+creation+read), 0..1. Default 0.80.
 	HitRateTarget float64 `yaml:"hit-rate-target" json:"hit-rate-target"`
+	// CreationRateTarget is desired cache_creation / (input+creation+read), 0..1.
+	// Default 0.10 when omitted. Explicit 0 disables fixed creation ratio (legacy hit-rate-only).
+	// Pointer so YAML can distinguish unset (nil → default 0.10) from explicit 0.
+	CreationRateTarget *float64 `yaml:"creation-rate-target,omitempty" json:"creation-rate-target,omitempty"`
 	// MinCacheableTokens minimum estimated cacheable prefix. Default 100.
 	MinCacheableTokens int `yaml:"min-cacheable-tokens" json:"min-cacheable-tokens"`
 	// EphemeralTTLSeconds local LRU TTL for ephemeral prefixes. Default 300.

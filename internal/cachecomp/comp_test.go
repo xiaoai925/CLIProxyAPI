@@ -29,6 +29,7 @@ func TestCompensateHitRate(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MetadataEnabled = false
 	cfg.HitRateTarget = 0.80
+	cfg.CreationRateTarget = 0 // legacy: only read ratio
 	stats := PromptCacheStats{CacheableTokens: 0}
 	raw := AnthropicUsage{InputTokens: 1000, OutputTokens: 50}
 	got := Compensate(cfg, stats, raw, nil)
@@ -45,10 +46,35 @@ func TestCompensateHitRate(t *testing.T) {
 	}
 }
 
+func TestCompensateFixedRatios(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MetadataEnabled = false
+	cfg.HitRateTarget = 0.80
+	cfg.CreationRateTarget = 0.10
+	stats := PromptCacheStats{}
+	// After ApplyToOpenAIBody rebuild: full prompt as InputTokens, no upstream split.
+	raw := AnthropicUsage{InputTokens: 1000, OutputTokens: 20}
+	got := Compensate(cfg, stats, raw, nil)
+	total := got.InputTokens + got.CacheCreationInputTokens + got.CacheReadInputTokens
+	if total != 1000 {
+		t.Fatalf("total=%d want 1000; %+v", total, got)
+	}
+	if got.CacheCreationInputTokens != 100 {
+		t.Fatalf("creation=%d want 100; %+v", got.CacheCreationInputTokens, got)
+	}
+	if got.CacheReadInputTokens != 800 {
+		t.Fatalf("read=%d want 800; %+v", got.CacheReadInputTokens, got)
+	}
+	if got.InputTokens != 100 {
+		t.Fatalf("input=%d want 100; %+v", got.InputTokens, got)
+	}
+}
+
 func TestCompensateWithCacheableHit(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MetadataEnabled = false
 	cfg.HitRateTarget = 0.80
+	cfg.CreationRateTarget = 0
 	stats := PromptCacheStats{CacheableTokens: 600, CacheHit: true}
 	raw := AnthropicUsage{InputTokens: 1000, OutputTokens: 20}
 	got := Compensate(cfg, stats, raw, nil)
@@ -86,6 +112,7 @@ func TestApplyToOpenAIBody(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MetadataEnabled = false
 	cfg.HitRateTarget = 0.8
+	cfg.CreationRateTarget = 0.1
 	cfg.SyncOpenAICachedTokens = true
 	orig := []byte(`{"model":"grok-4.5","messages":[{"role":"system","content":"stable system prompt for caching test content 1234567890"},{"role":"user","content":"hello"}]}`)
 	body := []byte(`{"id":"x","object":"chat.completion","usage":{"prompt_tokens":1000,"completion_tokens":20,"total_tokens":1020,"completion_tokens_details":{"reasoning_tokens":5}}}`)
@@ -100,6 +127,8 @@ func TestApplyToOpenAIBody(t *testing.T) {
 	read := gjson.GetBytes(out, "usage.cache_read_input_tokens").Int()
 	creation := gjson.GetBytes(out, "usage.cache_creation_input_tokens").Int()
 	cached := gjson.GetBytes(out, "usage.prompt_tokens_details.cached_tokens").Int()
+	write := gjson.GetBytes(out, "usage.prompt_tokens_details.cache_write_tokens").Int()
+	creationAlias := gjson.GetBytes(out, "usage.prompt_tokens_details.cached_creation_tokens").Int()
 	if prompt != 1000 {
 		t.Fatalf("prompt_tokens=%d want 1000", prompt)
 	}
@@ -108,6 +137,12 @@ func TestApplyToOpenAIBody(t *testing.T) {
 	}
 	if cached != read {
 		t.Fatalf("cached_tokens=%d want read=%d", cached, read)
+	}
+	if write != creation || creationAlias != creation {
+		t.Fatalf("write/creation alias mismatch write=%d alias=%d creation=%d body=%s", write, creationAlias, creation, out)
+	}
+	if creation != 100 || read != 800 {
+		t.Fatalf("fixed ratio want creation=100 read=800 got c=%d r=%d body=%s", creation, read, out)
 	}
 	if got := gjson.GetBytes(out, "usage.completion_tokens_details.reasoning_tokens").Int(); got != 5 {
 		t.Fatalf("reasoning_tokens lost: %d body=%s", got, out)

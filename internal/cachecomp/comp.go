@@ -23,6 +23,14 @@ type Config struct {
 	// HitRateTarget is desired cache_read / total input-side tokens (0..1). Default 0.80.
 	HitRateTarget float64
 
+	// CreationRateTarget is desired cache_creation / total input-side tokens (0..1).
+	// Default 0.10. When > 0, final usage is forced to fixed ratios:
+	//   creation ≈ total * CreationRateTarget
+	//   read     ≈ total * HitRateTarget
+	//   input    ≈ total - creation - read (at least 1)
+	// This overrides upstream-only-read paths that otherwise leave creation at 0.
+	CreationRateTarget float64
+
 	// MinCacheableTokens is the minimum estimated cacheable prefix size. Default 100.
 	MinCacheableTokens int
 
@@ -56,6 +64,7 @@ func DefaultConfig() Config {
 	return Config{
 		Enabled:             true,
 		HitRateTarget:       0.80,
+		CreationRateTarget:  0.10,
 		MinCacheableTokens:  100,
 		EphemeralTTLSeconds: 300,
 		StaticTTLSeconds:    3600,
@@ -80,6 +89,21 @@ func (c Config) Normalize() Config {
 	}
 	if c.HitRateTarget > 1 {
 		c.HitRateTarget = 1
+	}
+	// CreationRateTarget: negative means "use default"; 0 disables fixed creation.
+	if c.CreationRateTarget < 0 {
+		c.CreationRateTarget = d.CreationRateTarget
+	}
+	if c.CreationRateTarget > 1 {
+		c.CreationRateTarget = 1
+	}
+	// Keep creation+read under 1 so uncached input can remain >=1 when total is large enough.
+	if c.CreationRateTarget+c.HitRateTarget > 1 {
+		// Prefer preserving read target; shrink creation.
+		c.CreationRateTarget = 1 - c.HitRateTarget
+		if c.CreationRateTarget < 0 {
+			c.CreationRateTarget = 0
+		}
 	}
 	if c.MinCacheableTokens <= 0 {
 		c.MinCacheableTokens = d.MinCacheableTokens
@@ -355,8 +379,14 @@ func Compensate(cfg Config, stats PromptCacheStats, raw AnthropicUsage, original
 		}
 	}
 
-	// C: hit-rate compensation — only move from input → read
-	uncached, creation, read = applyCacheHitRateCompensation(uncached, creation, read, cfg.HitRateTarget)
+	// C: fixed-ratio or hit-rate compensation.
+	// When CreationRateTarget > 0, force both creation/read ratios on total input-side.
+	// Otherwise keep legacy behavior: only move from input → read (creation stays 0 for Grok).
+	if cfg.CreationRateTarget > 0 {
+		uncached, creation, read = applyFixedCacheRatios(uncached, creation, read, cfg.CreationRateTarget, cfg.HitRateTarget)
+	} else {
+		uncached, creation, read = applyCacheHitRateCompensation(uncached, creation, read, cfg.HitRateTarget)
+	}
 
 	return AnthropicUsage{
 		InputTokens:              uncached,
@@ -414,10 +444,17 @@ func (e *Engine) ApplyToOpenAIBody(cfg Config, model string, originalRequest, bo
 	out, _ = sjson.SetBytes(out, "usage.prompt_tokens", promptTotal)
 	out, _ = sjson.SetBytes(out, "usage.completion_tokens", comp.OutputTokens)
 	out, _ = sjson.SetBytes(out, "usage.total_tokens", promptTotal+comp.OutputTokens)
+	// Anthropic-style top-level fields (some clients / Claude converters).
 	out, _ = sjson.SetBytes(out, "usage.cache_read_input_tokens", comp.CacheReadInputTokens)
 	out, _ = sjson.SetBytes(out, "usage.cache_creation_input_tokens", comp.CacheCreationInputTokens)
-	// Always keep xAI-style prompt_tokens_details.cached_tokens in sync with cache_read.
+	// NewAPI OpenAI channel only unmarshals prompt_tokens_details.* for cache:
+	//   cached_tokens          → cache read
+	//   cache_write_tokens     → cache creation (OpenAI native)
+	//   cached_creation_tokens → cache creation (Claude-derived alias)
+	// Top-level cache_read_input_tokens / cache_creation_input_tokens are ignored by NewAPI.
 	out, _ = sjson.SetBytes(out, "usage.prompt_tokens_details.cached_tokens", comp.CacheReadInputTokens)
+	out, _ = sjson.SetBytes(out, "usage.prompt_tokens_details.cache_write_tokens", comp.CacheCreationInputTokens)
+	out, _ = sjson.SetBytes(out, "usage.prompt_tokens_details.cached_creation_tokens", comp.CacheCreationInputTokens)
 	// Drop non-xAI aliases if present from prior injections.
 	out, _ = sjson.DeleteBytes(out, "usage.input_tokens")
 	out, _ = sjson.DeleteBytes(out, "usage.output_tokens")
@@ -670,6 +707,72 @@ func applyCacheHitRateCompensation(input, creation, read int64, target float64) 
 		transfer = 0
 	}
 	return input - transfer, creation, read + transfer
+}
+
+// applyFixedCacheRatios forces:
+//
+//	creation = total * creationTarget
+//	read     = total * readTarget
+//	input    = total - creation - read (at least 1 when total > 1)
+//
+// Prior creation/read values are discarded; ratios are absolute on total.
+func applyFixedCacheRatios(input, creation, read int64, creationTarget, readTarget float64) (int64, int64, int64) {
+	if creationTarget < 0 {
+		creationTarget = 0
+	}
+	if readTarget < 0 {
+		readTarget = 0
+	}
+	if creationTarget > 1 {
+		creationTarget = 1
+	}
+	if readTarget > 1 {
+		readTarget = 1
+	}
+	if creationTarget+readTarget > 1 {
+		// Prefer preserving read target; shrink creation.
+		creationTarget = 1 - readTarget
+		if creationTarget < 0 {
+			creationTarget = 0
+		}
+	}
+	total := input + creation + read
+	if total <= 0 {
+		return input, creation, read
+	}
+	targetCreation := int64(math.Round(creationTarget * float64(total)))
+	targetRead := int64(math.Round(readTarget * float64(total)))
+	if targetCreation < 0 {
+		targetCreation = 0
+	}
+	if targetRead < 0 {
+		targetRead = 0
+	}
+	// Leave at least 1 uncached token when possible.
+	maxCovered := total - 1
+	if maxCovered < 0 {
+		maxCovered = 0
+	}
+	if targetCreation+targetRead > maxCovered {
+		over := targetCreation + targetRead - maxCovered
+		// Shrink creation first, then read.
+		if targetCreation >= over {
+			targetCreation -= over
+		} else {
+			over -= targetCreation
+			targetCreation = 0
+			if targetRead >= over {
+				targetRead -= over
+			} else {
+				targetRead = 0
+			}
+		}
+	}
+	uncached := total - targetCreation - targetRead
+	if uncached < 0 {
+		uncached = 0
+	}
+	return uncached, targetCreation, targetRead
 }
 
 func estimateTokens(s string) int64 {

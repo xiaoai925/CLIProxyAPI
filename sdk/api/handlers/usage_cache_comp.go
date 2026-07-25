@@ -28,9 +28,16 @@ func CacheCompConfigFromSDK(cfg *config.SDKConfig) cachecomp.Config {
 	if c.MetadataEnabled != nil {
 		meta = *c.MetadataEnabled
 	}
+	// creation-rate-target: nil → default 0.10 (fixed-ratio A mode);
+	// explicit 0 → disable fixed creation (legacy hit-rate-only).
+	creationRate := 0.10
+	if c.CreationRateTarget != nil {
+		creationRate = *c.CreationRateTarget
+	}
 	return cachecomp.Config{
 		Enabled:                c.Enabled,
 		HitRateTarget:          c.HitRateTarget,
+		CreationRateTarget:     creationRate,
 		MinCacheableTokens:     c.MinCacheableTokens,
 		EphemeralTTLSeconds:    c.EphemeralTTLSeconds,
 		StaticTTLSeconds:       c.StaticTTLSeconds,
